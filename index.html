@@ -134,11 +134,10 @@
     document.addEventListener('DOMContentLoaded', async () => {
 
         // --- CONFIGURATION ---
-        const SUBMISSIONS_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSxW6lYLIfH1r9954znKNbcE90y5qit38yhhyhZnTv_pMCM46H6DdFzQ5ekkJbqtAwfwVBbNegOVzmU/pub?gid=0&single=true&output=csv'; // This is your original sample sheet.
-        // If the new sheet is different, update this URL:
-        const NEW_SUBMISSIONS_CSV_URL = 'https://docs.google.com/spreadsheets/d/146KZFEYwHJxyu0mwPk1M-8mgs9gs_U5rI1WajHNjpyM/export?format=csv&gid=0'; // Corrected URL for the shared sheet.
+        const SUBMISSIONS_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSxW6lYLIfH1r9954znKNbcE90y5qit38yhhyhZnTv_pMCM46H6DdFzQ5ekkJbqtAwfwVBbNegOVzmU/pub?gid=0&single=true&output=csv';
 
-        // Define expected EOC quiz prefixes
+        // Define expected EOC quiz prefixes and how to derive quiz name
+        // This will allow dynamic discovery of actual quiz names from the CSV
         const EOC_QUIZ_PREFIXES = [
             "EOC-M-C", // Math End-of-Chapter
             "EOC-R-C", // Reading End-of-Chapter
@@ -189,7 +188,7 @@
         }
 
         function formatTime(seconds) {
-            if (isNaN(seconds) || seconds === null || seconds < 0) return 'N/A';
+            if (isNaN(seconds) || seconds === null) return 'N/A';
             const minutes = Math.floor(seconds / 60);
             const remainingSeconds = Math.round(seconds % 60);
             return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
@@ -202,8 +201,7 @@
             kpiContainer.innerHTML = '';
 
             try {
-                // Use the NEW_SUBMISSIONS_CSV_URL for the sheet you just shared
-                const submissionsRes = await fetch(NEW_SUBMISSIONS_CSV_URL); 
+                const submissionsRes = await fetch(SUBMISSIONS_CSV_URL);
 
                 if (!submissionsRes.ok) throw new Error(`Failed to fetch submissions. Status: ${submissionsRes.status}`);
 
@@ -230,7 +228,6 @@
             const quizzes = new Set();
             submissions.forEach(row => {
                 const quizName = row.quiz_name;
-                // Check if quiz_name exists and starts with one of the EOC prefixes
                 if (quizName && EOC_QUIZ_PREFIXES.some(prefix => quizName.startsWith(prefix))) {
                     quizzes.add(quizName);
                 }
@@ -265,150 +262,100 @@
             studentResultsSection.style.display = 'none';
             kpiContainer.innerHTML = '';
 
-            // This structure will hold submissions grouped by student, then by quiz, then by attempt
-            // { email: { quizName: [ { submission_obj1 }, { submission_obj2 } ] } }
-            const studentQuizSubmissionsRaw = {}; 
+            const studentQuizData = {}; // Stores { email: { attempts: [], latestAttempt: null, firstAttempt: null } }
 
             allSubmissions.forEach(row => {
                 const email = row.student_gmail_id;
                 const quizName = row.quiz_name;
                 const questionId = row.question_id;
-                const timestampStr = row.timestamp; // App Script write time
-                const timeTakenQuestion = parseFloat(row.time_taken_seconds); // Time for THIS question
+                const isCorrect = row.is_correct === 'TRUE';
+                const submissionTime = new Date(row.timestamp); // Assuming 'timestamp' column exists
+                const timeTakenSeconds = parseInt(row.time_taken_seconds, 10); // Assuming 'time_taken_seconds' column exists
 
-                if (!email || quizName !== selectedQuizName || !questionId || !timestampStr || isNaN(timeTakenQuestion)) {
-                    // console.warn(`Skipping row due to missing/invalid data: ${JSON.stringify(row)}`);
-                    return; // Skip rows that don't have essential data or aren't for the selected quiz
-                }
+                if (!email || quizName !== selectedQuizName || !questionId) return;
 
-                const submissionTime = new Date(timestampStr);
-                if (isNaN(submissionTime.getTime())) { 
-                    console.warn(`Invalid timestamp for row: ${JSON.stringify(row)}`);
-                    return;
+                // Group questions by attempt for each student
+                if (!studentQuizData[email]) {
+                    studentQuizData[email] = { attempts: [] };
                 }
 
-                if (!studentQuizSubmissionsRaw[email]) {
-                    studentQuizSubmissionsRaw[email] = {};
+                // Find or create the attempt
+                // This logic assumes time_taken_seconds is associated with the *submission event* of the entire quiz,
+                // or that individual question submissions within the same quiz are part of one logical attempt.
+                // For a more robust solution, you might need an explicit 'attempt_id' in your CSV.
+                let attempt = studentQuizData[email].attempts.find(a =>
+                    Math.abs(a.submissionTime.getTime() - submissionTime.getTime()) < (5 * 60 * 1000) // Group submissions within 5 minutes as one attempt
+                );
+
+                if (!attempt) {
+                    attempt = {
+                        submissionTime: submissionTime,
+                        correctCount: 0,
+                        totalQuestions: 0,
+                        timeTaken: timeTakenSeconds || 0, // Use parsed time, default to 0 if not present
+                        questionIds: new Set() // Track unique question IDs for this attempt
+                    };
+                    studentQuizData[email].attempts.push(attempt);
+                    studentQuizData[email].attempts.sort((a,b) => a.submissionTime.getTime() - b.submissionTime.getTime()); // Sort by time
                 }
-                if (!studentQuizSubmissionsRaw[email][quizName]) {
-                    studentQuizSubmissionsRaw[email][quizName] = [];
+
+                if (!attempt.questionIds.has(questionId)) { // Only count each unique question once per attempt
+                    attempt.questionIds.add(questionId);
+                    if (isCorrect) {
+                        attempt.correctCount++;
+                    }
+                    attempt.totalQuestions++;
                 }
-                studentQuizSubmissionsRaw[email][quizName].push({
-                    questionId: questionId,
-                    isCorrect: row.is_correct === 'TRUE',
-                    timestamp: submissionTime, // App Script write time
-                    timeTakenQuestion: timeTakenQuestion // Time spent on this specific question
-                });
             });
 
-            // Now, process these raw submissions into distinct attempts
+            // Determine the final score for each student based on attempt selection
             const studentResults = [];
             let totalStudentsWithData = 0;
-            let totalRawScoreSum = 0; // Sum of raw scores for average calculation
-            let totalPercentageCorrectSum = 0; // Sum of percentages for average calculation
-            let totalTimeTakenQuizSum = 0; // Sum of quiz times for average calculation
-            let studentsContributingToTimeAvg = 0;
+            let totalRawScore = 0;
+            let totalPercentageCorrect = 0;
+            let totalTimeTaken = 0;
+            let studentsWithTime = 0;
 
-            Object.keys(studentQuizSubmissionsRaw).forEach(email => {
-                const quizSubmissionsForStudent = studentQuizSubmissionsRaw[email][selectedQuizName];
+            Object.keys(studentQuizData).forEach(email => {
+                const studentAttempts = studentQuizData[email].attempts;
+                if (studentAttempts.length === 0) return;
 
-                if (!quizSubmissionsForStudent || quizSubmissionsForStudent.length === 0) return;
-
-                // Sort all submissions for this student+quiz by their timestamp
-                quizSubmissionsForStudent.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-
-                const studentAttempts = [];
-                let currentAttempt = null;
-                const ATTEMPT_IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes in milliseconds
-
-                quizSubmissionsForStudent.forEach(submission => {
-                    if (!currentAttempt) {
-                        // Start a new attempt
-                        currentAttempt = {
-                            submissions: [submission],
-                            firstTimestamp: submission.timestamp,
-                            lastTimestamp: submission.timestamp, // Will be updated as more questions come in
-                            correctCount: (submission.isCorrect ? 1 : 0),
-                            totalQuestions: 1, // Start with 1 question
-                            totalTimeSpentOnQuiz: submission.timeTakenQuestion, // Sum question times
-                            questionIdsInAttempt: new Set([submission.questionId]) // Track unique questions
-                        };
-                        studentAttempts.push(currentAttempt);
-                    } else {
-                        // Check if this submission is part of the current attempt or starts a new one
-                        const timeSinceLastSubmission = submission.timestamp.getTime() - currentAttempt.lastTimestamp.getTime();
-
-                        if (timeSinceLastSubmission > ATTEMPT_IDLE_THRESHOLD_MS) {
-                            // New attempt
-                            currentAttempt = {
-                                submissions: [submission],
-                                firstTimestamp: submission.timestamp,
-                                lastTimestamp: submission.timestamp,
-                                correctCount: (submission.isCorrect ? 1 : 0),
-                                totalQuestions: 1,
-                                totalTimeSpentOnQuiz: submission.timeTakenQuestion,
-                                questionIdsInAttempt: new Set([submission.questionId])
-                            };
-                            studentAttempts.push(currentAttempt);
-                        } else {
-                            // Continue current attempt
-                            currentAttempt.submissions.push(submission);
-                            currentAttempt.lastTimestamp = submission.timestamp;
-
-                            // Only add to count if it's a unique question for THIS attempt
-                            if (!currentAttempt.questionIdsInAttempt.has(submission.questionId)) {
-                                currentAttempt.questionIdsInAttempt.add(submission.questionId);
-                                currentAttempt.totalQuestions++;
-                                if (submission.isCorrect) {
-                                    currentAttempt.correctCount++;
-                                }
-                                currentAttempt.totalTimeSpentOnQuiz += submission.timeTakenQuestion;
-                            } else {
-                                // If question repeated, and it's already counted, just update its time_taken if higher
-                                // Or, choose to ignore repeat submissions for the same question within an attempt
-                                // For simplicity, we're currently summing only unique question times.
-                            }
-                        }
-                    }
-                });
-
-                let chosenAttemptFinalData = null;
-                if (selectedAttemptType === 'first' && studentAttempts.length > 0) {
-                    chosenAttemptFinalData = studentAttempts[0];
-                } else if (selectedAttemptType === 'latest' && studentAttempts.length > 0) {
-                    chosenAttemptFinalData = studentAttempts[studentAttempts.length - 1];
+                let chosenAttempt = null;
+                if (selectedAttemptType === 'first') {
+                    chosenAttempt = studentAttempts[0];
+                } else if (selectedAttemptType === 'latest') {
+                    chosenAttempt = studentAttempts[studentAttempts.length - 1];
                 }
+                // Extend this for specific attempt numbers if needed (e.g., studentAttempts[attemptNum - 1])
 
-                if (chosenAttemptFinalData) {
-                    const percentageCorrect = chosenAttemptFinalData.totalQuestions > 0
-                        ? (chosenAttemptFinalData.correctCount / chosenAttemptFinalData.totalQuestions) * 100
+                if (chosenAttempt) {
+                    const percentageCorrect = chosenAttempt.totalQuestions > 0
+                        ? (chosenAttempt.correctCount / chosenAttempt.totalQuestions) * 100
                         : 0;
 
                     studentResults.push({
                         email: email,
-                        raw_score: chosenAttemptFinalData.correctCount,
-                        total_questions: chosenAttemptFinalData.totalQuestions,
+                        raw_score: chosenAttempt.correctCount,
+                        total_questions: chosenAttempt.totalQuestions,
                         percentage_correct: percentageCorrect.toFixed(2),
-                        time_taken_seconds: chosenAttemptFinalData.totalTimeSpentOnQuiz
+                        time_taken_seconds: chosenAttempt.timeTaken
                     });
 
                     totalStudentsWithData++;
-                    totalRawScoreSum += chosenAttemptFinalData.correctCount;
-                    totalPercentageCorrectSum += percentageCorrect;
-                    
-                    // Only add to average time if total time is a positive number
-                    if (chosenAttemptFinalData.totalTimeSpentOnQuiz > 0) {
-                        totalTimeTakenQuizSum += chosenAttemptFinalData.totalTimeSpentOnQuiz;
-                        studentsContributingToTimeAvg++;
+                    totalRawScore += chosenAttempt.correctCount;
+                    totalPercentageCorrect += percentageCorrect;
+                    if (chosenAttempt.timeTaken > 0) { // Only average if time was recorded
+                        totalTimeTaken += chosenAttempt.timeTaken;
+                        studentsWithTime++;
                     }
                 }
             });
 
-            const avgRawScore = totalStudentsWithData > 0 ? (totalRawScoreSum / totalStudentsWithData).toFixed(2) : 0;
-            const avgPercentageCorrect = totalStudentsWithData > 0 ? (totalPercentageCorrectSum / totalStudentsWithData).toFixed(2) : 0;
-            const avgTimeTakenFormatted = studentsContributingToTimeAvg > 0 ? formatTime(totalTimeTakenQuizSum / studentsContributingToTimeAvg) : 'N/A';
+            const avgRawScore = totalStudentsWithData > 0 ? (totalRawScore / totalStudentsWithData).toFixed(2) : 0;
+            const avgPercentageCorrect = totalStudentsWithData > 0 ? (totalPercentageCorrect / totalStudentsWithData).toFixed(2) : 0;
+            const avgTimeTaken = studentsWithTime > 0 ? formatTime(totalTimeTaken / studentsWithTime) : 'N/A';
 
-            renderKPIs(totalStudentsWithData, avgRawScore, avgPercentageCorrect, avgTimeTakenFormatted);
+            renderKPIs(totalStudentsWithData, avgRawScore, avgPercentageCorrect, avgTimeTaken);
             renderStudentTable(studentResults, selectedQuizName);
 
             loader.style.display = 'none';

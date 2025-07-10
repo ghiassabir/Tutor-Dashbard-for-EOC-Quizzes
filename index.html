@@ -136,8 +136,11 @@
         // --- CONFIGURATION ---
         // IMPORTANT: Use the 'Publish to web' URL for your Google Sheet.
         // It should look like: https://docs.google.com/spreadsheets/d/e/2PACX-1v.../pub?gid=0&single=true&output=csv
-        // This is the URL that works with CORS for public access.
-        const SUBMISSIONS_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSxW6lYLIfH1r9954znKNbcE90y5qit38yhhyhZnTv_pMCM46H6DdFzQ5ekkJbqtAwfwVBbNegOVzmU/pub?gid=0&single=true&output=csv'; // REVERTED TO THIS FORMAT!
+        // This is the URL format that typically works with CORS for public access from web pages.
+        // This URL was in your original working version and should be used:
+        const SUBMISSIONS_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSxW6lYLIfH1r9954znKNbcE90y5qit38yhhyhZnTv_pMCM46H6DdFzQ5ekkJbqtAwfwVBbNegOVzmU/pub?gid=0&single=true&output=csv'; 
+        // If your data is actually in the sheet you screenshot, you need to publish *that specific sheet* to web
+        // and update this URL with the new 'pub?' URL Google provides.
 
         // Define expected EOC quiz prefixes
         const EOC_QUIZ_PREFIXES = [
@@ -203,7 +206,6 @@
             kpiContainer.innerHTML = '';
 
             try {
-                // Use the correct 'Publish to web' URL here
                 const submissionsRes = await fetch(SUBMISSIONS_CSV_URL); 
 
                 if (!submissionsRes.ok) throw new Error(`Failed to fetch submissions. Status: ${submissionsRes.status}`);
@@ -231,7 +233,6 @@
             const quizzes = new Set();
             submissions.forEach(row => {
                 const quizName = row.quiz_name;
-                // Check if quiz_name exists and starts with one of the EOC prefixes
                 if (quizName && EOC_QUIZ_PREFIXES.some(prefix => quizName.startsWith(prefix))) {
                     quizzes.add(quizName);
                 }
@@ -274,17 +275,21 @@
                 const email = row.student_gmail_id;
                 const quizName = row.quiz_name;
                 const questionId = row.question_id;
-                const timestampStr = row.timestamp; // App Script write time
-                const timeTakenQuestion = parseFloat(row.time_taken_seconds); // Time for THIS question
-
-                if (!email || quizName !== selectedQuizName || !questionId || !timestampStr || isNaN(timeTakenQuestion)) {
+                const timestampStr = row.timestamp; 
+                
+                // --- CORRECTED: Accessing 'is_correct' and 'time_spent_seconds' as separate columns ---
+                // Assuming your CSV headers are now truly 'is_correct' and 'time_spent_seconds'
+                const isCorrect = row.is_correct === 'TRUE'; 
+                const timeSpentOnQuestion = parseFloat(row.time_spent_seconds); // Directly parse the time
+                
+                if (!email || quizName !== selectedQuizName || !questionId || !timestampStr || isNaN(timeSpentOnQuestion)) {
                     // console.warn(`Skipping row due to missing/invalid data: ${JSON.stringify(row)}`);
                     return; // Skip rows that don't have essential data or aren't for the selected quiz
                 }
 
                 const submissionTime = new Date(timestampStr);
                 if (isNaN(submissionTime.getTime())) { 
-                    console.warn(`Invalid timestamp for row: ${JSON.stringify(row)}`);
+                    console.warn(`Invalid timestamp format for row: ${JSON.stringify(row)}`);
                     return;
                 }
 
@@ -296,18 +301,18 @@
                 }
                 studentQuizSubmissionsRaw[email][quizName].push({
                     questionId: questionId,
-                    isCorrect: row.is_correct === 'TRUE',
-                    timestamp: submissionTime, // App Script write time
-                    timeTakenQuestion: timeTakenQuestion // Time spent on this specific question
+                    isCorrect: isCorrect,
+                    timestamp: submissionTime, 
+                    timeSpentQuestion: timeSpentOnQuestion // Use the direct numerical time
                 });
             });
 
             // Now, process these raw submissions into distinct attempts
             const studentResults = [];
             let totalStudentsWithData = 0;
-            let totalRawScoreSum = 0; // Sum of raw scores for average calculation
-            let totalPercentageCorrectSum = 0; // Sum of percentages for average calculation
-            let totalTimeTakenQuizSum = 0; // Sum of quiz times for average calculation
+            let totalRawScoreSum = 0; 
+            let totalPercentageCorrectSum = 0; 
+            let totalTimeSpentQuizSum = 0; 
             let studentsContributingToTimeAvg = 0;
 
             Object.keys(studentQuizSubmissionsRaw).forEach(email => {
@@ -315,58 +320,53 @@
 
                 if (!quizSubmissionsForStudent || quizSubmissionsForStudent.length === 0) return;
 
-                // Sort all submissions for this student+quiz by their timestamp
                 quizSubmissionsForStudent.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
                 const studentAttempts = [];
                 let currentAttempt = null;
-                const ATTEMPT_IDLE_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes in milliseconds. Adjust as needed.
+                const ATTEMPT_IDLE_THRESHOLD_MS = 60 * 60 * 1000; // 60 minutes idle to consider a new attempt
 
                 quizSubmissionsForStudent.forEach(submission => {
                     if (!currentAttempt) {
-                        // Start a new attempt
                         currentAttempt = {
-                            firstSubmissionTime: submission.timestamp, // Mark the start of this attempt
-                            lastSubmissionTime: submission.timestamp, // Mark the most recent submission time in this attempt
                             correctCount: 0,
                             totalQuestions: 0, 
                             totalTimeSpentOnQuiz: 0, 
-                            questionIdsInAttempt: new Set() 
+                            questionIdsInAttempt: new Set(),
+                            firstSubmissionTimestamp: submission.timestamp, // To track overall attempt duration if needed
+                            lastSubmissionTimestamp: submission.timestamp // To track overall attempt duration if needed
                         };
                         studentAttempts.push(currentAttempt);
                     } else {
-                        // Check if this submission is part of the current attempt or starts a new one
-                        const timeSinceLastSubmission = submission.timestamp.getTime() - currentAttempt.lastSubmissionTime.getTime();
+                        const timeSinceLastSubmission = submission.timestamp.getTime() - currentAttempt.lastSubmissionTimestamp.getTime();
 
                         if (timeSinceLastSubmission > ATTEMPT_IDLE_THRESHOLD_MS) {
                             // New attempt
                             currentAttempt = {
-                                firstSubmissionTime: submission.timestamp,
-                                lastSubmissionTime: submission.timestamp,
                                 correctCount: 0,
                                 totalQuestions: 0,
                                 totalTimeSpentOnQuiz: 0,
-                                questionIdsInAttempt: new Set()
+                                questionIdsInAttempt: new Set(),
+                                firstSubmissionTimestamp: submission.timestamp,
+                                lastSubmissionTimestamp: submission.timestamp
                             };
                             studentAttempts.push(currentAttempt);
                         } else {
                             // Continue current attempt
-                            currentAttempt.lastSubmissionTime = submission.timestamp;
+                            currentAttempt.lastSubmissionTimestamp = submission.timestamp;
                         }
                     }
 
-                    // For the current attempt, process the submission's data
-                    // Only add to count/time if it's a unique question for THIS attempt
+                    // Process the question for the current attempt
                     if (!currentAttempt.questionIdsInAttempt.has(submission.questionId)) {
                         currentAttempt.questionIdsInAttempt.add(submission.questionId);
                         currentAttempt.totalQuestions++;
                         if (submission.isCorrect) {
                             currentAttempt.correctCount++;
                         }
-                        currentAttempt.totalTimeSpentOnQuiz += submission.timeTakenQuestion;
+                        // Add the time spent on *this specific question*
+                        currentAttempt.totalTimeSpentOnQuiz += submission.timeSpentQuestion; 
                     }
-                    // If the question is repeated within an attempt, we've chosen to count its score/time once for the *first* instance.
-                    // If you wanted to, for example, replace the time for a question if a student spent more time on a retry, that logic would go here.
                 });
 
                 let chosenAttemptFinalData = null;
@@ -380,22 +380,21 @@
                     const percentageCorrect = chosenAttemptFinalData.totalQuestions > 0
                         ? (chosenAttemptFinalData.correctCount / chosenAttemptFinalData.totalQuestions) * 100
                         : 0;
-
+                    
                     studentResults.push({
                         email: email,
                         raw_score: chosenAttemptFinalData.correctCount,
                         total_questions: chosenAttemptFinalData.totalQuestions,
                         percentage_correct: percentageCorrect.toFixed(2),
-                        time_taken_seconds: chosenAttemptFinalData.totalTimeSpentOnQuiz
+                        time_taken_seconds: chosenAttemptFinalData.totalTimeSpentOnQuiz // This is now sum of individual question times
                     });
 
                     totalStudentsWithData++;
                     totalRawScoreSum += chosenAttemptFinalData.correctCount;
                     totalPercentageCorrectSum += percentageCorrect;
                     
-                    // Only add to average time if total time is a positive number
                     if (chosenAttemptFinalData.totalTimeSpentOnQuiz > 0) {
-                        totalTimeTakenQuizSum += chosenAttemptFinalData.totalTimeSpentOnQuiz;
+                        totalTimeSpentQuizSum += chosenAttemptFinalData.totalTimeSpentOnQuiz;
                         studentsContributingToTimeAvg++;
                     }
                 }
@@ -403,7 +402,7 @@
 
             const avgRawScore = totalStudentsWithData > 0 ? (totalRawScoreSum / totalStudentsWithData).toFixed(2) : 0;
             const avgPercentageCorrect = totalStudentsWithData > 0 ? (totalPercentageCorrectSum / totalStudentsWithData).toFixed(2) : 0;
-            const avgTimeTakenFormatted = studentsContributingToTimeAvg > 0 ? formatTime(totalTimeTakenQuizSum / studentsContributingToTimeAvg) : 'N/A';
+            const avgTimeTakenFormatted = studentsContributingToTimeAvg > 0 ? formatTime(totalTimeSpentQuizSum / studentsContributingToTimeAvg) : 'N/A';
 
             renderKPIs(totalStudentsWithData, avgRawScore, avgPercentageCorrect, avgTimeTakenFormatted);
             renderStudentTable(studentResults, selectedQuizName);
@@ -419,7 +418,7 @@
                 <div class="kpi-card"><div class="title">Total Students with Data</div><div class="value">${total}</div></div>
                 <div class="kpi-card"><div class="title">Avg. Raw Score</div><div class="value">${avgRaw}</div></div>
                 <div class="kpi-card"><div class="title">Avg. % Correct</div><div class="value">${avgPercent}%</div></div>
-                <div class="kpi-card"><div class="title">Avg. Time Taken</div><div class="value">${avgTime}</div></div>
+                <div class="kpi-card"><div class="title">Avg. Time Taken (Active)</div><div class="value">${avgTime}</div></div>
             `;
         }
 

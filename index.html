@@ -104,12 +104,12 @@
     <main>
         <section id="filter-container">
             <div class="filter-group">
-                <label for="quiz-filter">Select Quiz:</label>
-                <select id="quiz-filter"></select>
-            </div>
-            <div class="filter-group">
                 <label for="student-filter">Select Student:</label>
                 <select id="student-filter"></select>
+            </div>
+            <div class="filter-group">
+                <label for="quiz-filter">Select Quiz:</label>
+                <select id="quiz-filter"></select>
             </div>
             <div class="filter-group">
                 <label for="attempt-filter">Attempt:</label>
@@ -122,319 +122,296 @@
 
         <section id="kpi-container"></section>
         
-        <section id="student-results-section" class="results-section" style="display:none;">
-            <div class="results-header" id="student-results-header">Student Scores</div>
+        <section id="results-section" class="results-section" style="display:none;">
+            <div class="results-header" id="results-header">Results</div>
             <div class="table-wrapper">
                 <table id="results-table">
-                    <thead>
-                        <tr>
-                            <th>Student Email</th>
-                            <th>Raw Score</th>
-                            <th>Total Questions</th>
-                            <th>Percentage Correct</th>
-                            <th>Time Taken (MM:SS)</th>
-                        </tr>
-                    </thead>
-                    <tbody id="results-body"></tbody>
+                    <thead id="results-table-head"></thead>
+                    <tbody id="results-table-body"></tbody>
                 </table>
             </div>
         </section>
 
         <section id="deep-dive-section" class="results-section" style="display:none;">
             <div class="results-header">Deep Dive Analysis: Most Incorrect Questions</div>
-            <div id="question-analysis-results" class="table-wrapper">
-                </div>
+            <div id="question-analysis-results" class="table-wrapper"></div>
         </section>
 
         <div id="loader" class="loader"><p>Loading quiz data...</p></div>
     </main>
 
-    <script>
-    document.addEventListener('DOMContentLoaded', async () => {
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    // --- CONFIGURATION ---
+    const SUBMISSIONS_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSxW6lYLIfH1r9954znKNbcE90y5qit38yhhyhZnTv_pMCM46H6DdFzQ5ekkJbqtAwfwVBbNegOVzmU/pub?gid=0&single=true&output=csv';
+    const EOC_QUIZ_PREFIXES = ["EOC-M-C", "EOC-R-C", "EOC-G-C"];
 
-        // --- CONFIGURATION ---
-        // IMPORTANT: Use the 'Publish to web' URL for your Google Sheet (output=csv).
-        const SUBMISSIONS_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSxW6lYLIfH1r9954znKNbcE90y5qit38yhhyhZnTv_pMCM46H6DdFzQ5ekkJbqtAwfwVBbNegOVzmU/pub?gid=0&single=true&output=csv'; 
-        
-        const EOC_QUIZ_PREFIXES = ["EOC-M-C", "EOC-R-C", "EOC-G-C"];
+    // --- DOM Elements ---
+    const studentFilter = document.getElementById('student-filter');
+    const quizFilter = document.getElementById('quiz-filter');
+    const attemptFilter = document.getElementById('attempt-filter');
+    const loader = document.getElementById('loader');
+    const kpiContainer = document.getElementById('kpi-container');
+    const resultsSection = document.getElementById('results-section');
+    const resultsHeader = document.getElementById('results-header');
+    const resultsTableHead = document.getElementById('results-table-head');
+    const resultsTableBody = document.getElementById('results-table-body');
+    const deepDiveSection = document.getElementById('deep-dive-section');
+    const questionAnalysisResults = document.getElementById('question-analysis-results');
 
-        // --- DOM Elements ---
-        const quizFilter = document.getElementById('quiz-filter');
-        const studentFilter = document.getElementById('student-filter');
-        const attemptFilter = document.getElementById('attempt-filter');
-        const loader = document.getElementById('loader');
-        const studentResultsSection = document.getElementById('student-results-section');
-        const studentResultsHeader = document.getElementById('student-results-header');
-        const kpiContainer = document.getElementById('kpi-container');
-        const deepDiveSection = document.getElementById('deep-dive-section');
-        const questionAnalysisResults = document.getElementById('question-analysis-results');
+    let allSubmissions = [];
+    let uniqueQuizNames = new Set();
 
-        let allSubmissions = []; // Store all parsed submissions globally
-
-        // --- HELPER FUNCTIONS ---
-        function parseCSV(text) {
-            const lines = text.trim().split('\n');
-            const headers = lines[0].split(',').map(h => h.trim());
-            return lines.slice(1).map(line => {
-                const obj = {};
-                // A simple regex to handle commas inside quoted fields
-                const values = line.match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g) || [];
-                headers.forEach((header, i) => {
-                    let value = (values[i] || '').trim();
-                    // Remove quotes from start and end
-                    if (value.startsWith('"') && value.endsWith('"')) {
-                        value = value.substring(1, value.length - 1);
-                    }
-                    obj[header] = value;
-                });
-                return obj;
+    // --- HELPER FUNCTIONS ---
+    const parseCSV = text => {
+        const lines = text.trim().split('\n');
+        const headers = lines[0].split(',').map(h => h.trim());
+        return lines.slice(1).map(line => {
+            const obj = {};
+            const values = line.match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g) || [];
+            headers.forEach((header, i) => {
+                let value = (values[i] || '').trim().replace(/^"|"$/g, '');
+                obj[header] = value;
             });
-        }
+            return obj;
+        });
+    };
 
-        function formatTime(seconds) {
-            if (isNaN(seconds) || seconds === null || seconds < 0) return 'N/A';
-            const minutes = Math.floor(seconds / 60);
-            const remainingSeconds = Math.round(seconds % 60);
-            return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
-        }
+    const formatTime = seconds => {
+        if (isNaN(seconds) || seconds === null || seconds < 0) return 'N/A';
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = Math.round(seconds % 60);
+        return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+    };
 
-        // --- DATA LOADING & INITIALIZATION ---
-        async function loadAndProcessData() {
-            loader.style.display = 'block';
-            try {
-                const response = await fetch(SUBMISSIONS_CSV_URL);
-                if (!response.ok) throw new Error(`Failed to fetch CSV: ${response.statusText}`);
-                const csvText = await response.text();
-                allSubmissions = parseCSV(csvText);
+    // --- DATA LOADING & INITIALIZATION ---
+    const loadAndProcessData = async () => {
+        loader.style.display = 'block';
+        try {
+            const response = await fetch(SUBMISSIONS_CSV_URL);
+            if (!response.ok) throw new Error(`Failed to fetch CSV: ${response.statusText}`);
+            const csvText = await response.text();
+            allSubmissions = parseCSV(csvText);
 
-                if (allSubmissions.length > 0) {
-                    populateFilters();
-                    updateDashboard();
-                } else {
-                    loader.innerHTML = '<p>No submission data found.</p>';
-                }
-            } catch (error) {
-                console.error("Error loading or processing data:", error);
-                loader.innerHTML = `<p style="color:red;">Error: ${error.message}</p>`;
+            if (allSubmissions.length > 0) {
+                populateStudentFilter();
+                updateQuizFilterOptions(); // This will populate quizzes based on default "All Students"
+                updateDashboard();
+            } else {
+                loader.innerHTML = '<p>No submission data found.</p>';
             }
+        } catch (error) {
+            console.error("Error loading or processing data:", error);
+            loader.innerHTML = `<p style="color:red;">Error: ${error.message}</p>`;
         }
+    };
+
+    const populateStudentFilter = () => {
+        const studentEmails = new Set(allSubmissions.map(row => row.student_gmail_id).filter(Boolean));
+        const studentOptions = ['<option value="all">All Students</option>', ...Array.from(studentEmails).sort().map(email => `<option value="${email}">${email}</option>`)];
+        studentFilter.innerHTML = studentOptions.join('');
+    };
+
+    const updateQuizFilterOptions = () => {
+        const selectedStudent = studentFilter.value;
+        let quizzesToShow;
+
+        if (selectedStudent === 'all') {
+            // Show all EOC quizzes
+            if (uniqueQuizNames.size === 0) { // Populate only once
+                allSubmissions.forEach(row => {
+                    if (row.quiz_name && EOC_QUIZ_PREFIXES.some(prefix => row.quiz_name.startsWith(prefix))) {
+                        uniqueQuizNames.add(row.quiz_name);
+                    }
+                });
+            }
+            quizzesToShow = Array.from(uniqueQuizNames).sort();
+            quizFilter.innerHTML = quizzesToShow.map(name => `<option value="${name}">${name}</option>`).join('');
+        } else {
+            // Show quizzes for the selected student, plus an "All Quizzes" option
+            const studentQuizzes = new Set(
+                allSubmissions
+                .filter(row => row.student_gmail_id === selectedStudent && EOC_QUIZ_PREFIXES.some(prefix => row.quiz_name.startsWith(prefix)))
+                .map(row => row.quiz_name)
+            );
+            quizzesToShow = Array.from(studentQuizzes).sort();
+            const quizOptions = ['<option value="all_for_student">-- All Quizzes --</option>', ...quizzesToShow.map(name => `<option value="${name}">${name}</option>`)];
+            quizFilter.innerHTML = quizOptions.join('');
+        }
+    };
+    
+    // --- CORE LOGIC ---
+    const updateDashboard = () => {
+        const selectedStudent = studentFilter.value;
+        const selectedQuiz = quizFilter.value;
+        const selectedAttempt = attemptFilter.value;
+
+        loader.style.display = 'block';
+        [kpiContainer, resultsSection, deepDiveSection].forEach(el => el.style.display = 'none');
+
+        if (selectedStudent !== 'all' && selectedQuiz === 'all_for_student') {
+            // View 1: Show all quiz results for a single student
+            renderAllQuizzesForStudent(selectedStudent, selectedAttempt);
+        } else {
+            // View 2: Show all student results for a single quiz
+            renderAllStudentsForQuiz(selectedQuiz, selectedAttempt, selectedStudent);
+        }
+        loader.style.display = 'none';
+    };
+
+    const renderAllQuizzesForStudent = (studentEmail, selectedAttempt) => {
+        resultsSection.style.display = 'block';
+        resultsHeader.textContent = `Performance Overview for ${studentEmail}`;
+        resultsTableHead.innerHTML = `<tr><th>S.No.</th><th>Quiz Name</th><th>Raw Score</th><th>Total Questions</th><th>Percentage Correct</th><th>Time Taken</th></tr>`;
         
-        function populateFilters() {
-            const quizNames = new Set();
-            const studentEmails = new Set();
-
-            allSubmissions.forEach(row => {
-                if (row.quiz_name && EOC_QUIZ_PREFIXES.some(prefix => row.quiz_name.startsWith(prefix))) {
-                    quizNames.add(row.quiz_name);
-                }
-                if (row.student_gmail_id) {
-                    studentEmails.add(row.student_gmail_id);
-                }
-            });
-
-            // Populate Quiz Filter
-            quizFilter.innerHTML = Array.from(quizNames).sort().map(name => `<option value="${name}">${name}</option>`).join('');
-            
-            // Populate Student Filter
-            const studentOptions = ['<option value="all">All Students</option>'];
-            studentOptions.push(...Array.from(studentEmails).sort().map(email => `<option value="${email}">${email}</option>`));
-            studentFilter.innerHTML = studentOptions.join('');
-        }
-
-        // --- CORE LOGIC: Dashboard Update ---
-        function updateDashboard() {
-            const selectedQuiz = quizFilter.value;
-            const selectedStudent = studentFilter.value;
-            const selectedAttempt = attemptFilter.value;
-
-            if (!selectedQuiz) {
-                loader.innerHTML = '<p>Please select a quiz to see results.</p>';
-                [kpiContainer, studentResultsSection, deepDiveSection].forEach(el => el.style.display = 'none');
-                return;
+        const studentQuizzes = new Set(allSubmissions.filter(r => r.student_gmail_id === studentEmail).map(r => r.quiz_name));
+        const results = [];
+        studentQuizzes.forEach(quizName => {
+            if (!EOC_QUIZ_PREFIXES.some(prefix => quizName.startsWith(prefix))) return;
+            const singleQuizResults = processAttempts(quizName, selectedAttempt);
+            const studentResult = singleQuizResults.find(r => r.email === studentEmail);
+            if (studentResult) {
+                results.push({ ...studentResult, quizName });
             }
-
-            loader.style.display = 'block';
-            [kpiContainer, studentResultsSection, deepDiveSection].forEach(el => el.style.display = 'none');
-
-            // 1. Process all student attempts for the selected quiz
-            const fullStudentResults = processAllAttempts(selectedQuiz, selectedAttempt);
-
-            // 2. Filter results based on selected student
-            const displayedStudentResults = selectedStudent === 'all' 
-                ? fullStudentResults 
-                : fullStudentResults.filter(res => res.email === selectedStudent);
-            
-            // 3. Render KPIs and Student Table based on filtered results
-            const kpis = calculateKPIs(displayedStudentResults);
-            renderKPIs(kpis);
-            renderStudentTable(displayedStudentResults, selectedQuiz);
-            
-            // 4. Perform and Render Deep Dive Analysis (independent of student/attempt filters)
-            performDeepDiveAnalysis(selectedQuiz);
-
-            loader.style.display = 'none';
-            [studentResultsSection, deepDiveSection].forEach(el => el.style.display = 'block');
-        }
-
-        function processAllAttempts(selectedQuizName, selectedAttemptType) {
-            const submissionsByStudent = {};
-            allSubmissions
-                .filter(row => row.quiz_name === selectedQuizName && row.student_gmail_id)
-                .forEach(row => {
-                    if (!submissionsByStudent[row.student_gmail_id]) {
-                        submissionsByStudent[row.student_gmail_id] = [];
-                    }
-                    submissionsByStudent[row.student_gmail_id].push(row);
-                });
-            
-            const results = [];
-            for (const email in submissionsByStudent) {
-                const submissions = submissionsByStudent[email].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-                const ATTEMPT_IDLE_THRESHOLD_MS = 60 * 60 * 1000; // 60 mins
-                
-                const attempts = [];
-                let currentAttempt = null;
-
-                submissions.forEach(sub => {
-                    const submissionTime = new Date(sub.timestamp);
-                    if (!currentAttempt || (submissionTime - currentAttempt.lastTimestamp > ATTEMPT_IDLE_THRESHOLD_MS)) {
-                        currentAttempt = { questions: new Map(), lastTimestamp: submissionTime };
-                        attempts.push(currentAttempt);
-                    }
-                    if (!currentAttempt.questions.has(sub.question_id)) {
-                        currentAttempt.questions.set(sub.question_id, {
-                            isCorrect: sub.is_correct === 'TRUE',
-                            timeSpent: parseFloat(sub.time_spent_seconds) || 0
-                        });
-                    }
-                    currentAttempt.lastTimestamp = submissionTime;
-                });
-
-                let chosenAttempt = null;
-                if (selectedAttemptType === 'first' && attempts.length > 0) chosenAttempt = attempts[0];
-                else if (selectedAttemptType === 'latest' && attempts.length > 0) chosenAttempt = attempts[attempts.length - 1];
-
-                if (chosenAttempt) {
-                    let correctCount = 0;
-                    let totalTime = 0;
-                    chosenAttempt.questions.forEach(q => {
-                        if (q.isCorrect) correctCount++;
-                        totalTime += q.timeSpent;
-                    });
-                    const totalQuestions = chosenAttempt.questions.size;
-                    const percentage = totalQuestions > 0 ? (correctCount / totalQuestions) * 100 : 0;
-
-                    results.push({
-                        email: email,
-                        raw_score: correctCount,
-                        total_questions: totalQuestions,
-                        percentage_correct: percentage.toFixed(1),
-                        time_taken_seconds: totalTime
-                    });
-                }
-            }
-            return results;
-        }
-
-        function performDeepDiveAnalysis(selectedQuizName) {
-            const incorrectCounts = {};
-            allSubmissions
-                .filter(row => row.quiz_name === selectedQuizName && row.is_correct === 'FALSE')
-                .forEach(row => {
-                    const qId = row.question_id;
-                    if (qId) {
-                        incorrectCounts[qId] = (incorrectCounts[qId] || 0) + 1;
-                    }
-                });
-
-            const sortedQuestions = Object.entries(incorrectCounts)
-                .sort(([, countA], [, countB]) => countB - countA);
-            
-            renderDeepDiveTable(sortedQuestions);
-        }
+        });
         
-        // --- RENDER FUNCTIONS ---
-        function calculateKPIs(results) {
-            const totalStudents = results.length;
-            if (totalStudents === 0) return { total: 0, avgRaw: 0, avgPercent: 0, avgTime: 'N/A' };
-            
-            const totalRawScore = results.reduce((sum, r) => sum + r.raw_score, 0);
-            const totalPercent = results.reduce((sum, r) => sum + parseFloat(r.percentage_correct), 0);
-            const totalTime = results.reduce((sum, r) => sum + r.time_taken_seconds, 0);
+        results.sort((a,b) => a.quizName.localeCompare(b.quizName));
+        resultsTableBody.innerHTML = results.map((res, index) => `
+            <tr>
+                <td>${index + 1}</td>
+                <td>${res.quizName}</td>
+                <td>${res.raw_score}</td>
+                <td>${res.total_questions}</td>
+                <td><b>${res.percentage_correct}%</b></td>
+                <td>${formatTime(res.time_taken_seconds)}</td>
+            </tr>
+        `).join('');
+    };
 
-            return {
-                total: totalStudents,
-                avgRaw: (totalRawScore / totalStudents).toFixed(1),
-                avgPercent: (totalPercent / totalStudents).toFixed(1),
-                avgTime: formatTime(totalTime / totalStudents)
-            };
-        }
+    const renderAllStudentsForQuiz = (quizName, selectedAttempt, selectedStudent) => {
+        [kpiContainer, resultsSection, deepDiveSection].forEach(el => el.style.display = 'block');
+        resultsHeader.textContent = `Student Scores for ${quizName}`;
+        resultsTableHead.innerHTML = `<tr><th>S.No.</th><th>Student Email</th><th>Raw Score</th><th>Total Questions</th><th>Percentage Correct</th><th>Time Taken</th></tr>`;
 
-        function renderKPIs({ total, avgRaw, avgPercent, avgTime }) {
-            kpiContainer.innerHTML = `
-                <div class="kpi-card"><div class="title">Total Submissions</div><div class="value">${total}</div></div>
-                <div class="kpi-card"><div class="title">Avg. Raw Score</div><div class="value">${avgRaw}</div></div>
-                <div class="kpi-card"><div class="title">Avg. % Correct</div><div class="value">${avgPercent}%</div></div>
-                <div class="kpi-card"><div class="title">Avg. Time Taken</div><div class="value">${avgTime}</div></div>
-            `;
-        }
-
-        function renderStudentTable(data, quizName) {
-            studentResultsHeader.textContent = `Student Scores for ${quizName}`;
-            const tableBody = document.getElementById('results-body');
-            data.sort((a, b) => b.percentage_correct - a.percentage_correct);
-            
-            if (data.length === 0) {
-                tableBody.innerHTML = `<tr><td colspan="5" style="text-align:center;">No data available for the selected filters.</td></tr>`;
-                return;
-            }
-
-            tableBody.innerHTML = data.map(student => `
+        const allResults = processAttempts(quizName, selectedAttempt);
+        const displayedResults = selectedStudent === 'all' ? allResults : allResults.filter(r => r.email === selectedStudent);
+        
+        const kpis = calculateKPIs(displayedResults);
+        renderKPIs(kpis);
+        
+        displayedResults.sort((a, b) => b.percentage_correct - a.percentage_correct);
+        resultsTableBody.innerHTML = displayedResults.length === 0 
+            ? `<tr><td colspan="6" style="text-align:center;">No data available for the selected filters.</td></tr>`
+            : displayedResults.map((res, index) => `
                 <tr>
-                    <td>${student.email}</td>
-                    <td>${student.raw_score}</td>
-                    <td>${student.total_questions}</td>
-                    <td><b>${student.percentage_correct}%</b></td>
-                    <td>${formatTime(student.time_taken_seconds)}</td>
+                    <td>${index + 1}</td>
+                    <td>${res.email}</td>
+                    <td>${res.raw_score}</td>
+                    <td>${res.total_questions}</td>
+                    <td><b>${res.percentage_correct}%</b></td>
+                    <td>${formatTime(res.time_taken_seconds)}</td>
                 </tr>
             `).join('');
-        }
         
-        function renderDeepDiveTable(sortedQuestions) {
-            if (sortedQuestions.length === 0) {
-                questionAnalysisResults.innerHTML = `<p style="padding:1rem 1.5rem; text-align:center;">No incorrect answers recorded for this quiz.</p>`;
-                return;
-            }
+        performDeepDiveAnalysis(quizName);
+    };
 
-            const table = `
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Question ID</th>
-                            <th>Times Answered Incorrectly</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${sortedQuestions.map(([id, count]) => `
-                            <tr>
-                                <td>${id}</td>
-                                <td><b>${count}</b></td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
-            `;
-            questionAnalysisResults.innerHTML = table;
-        }
-
-        // --- Event Listeners ---
-        [quizFilter, studentFilter, attemptFilter].forEach(el => {
-            el.addEventListener('change', updateDashboard);
+    // --- DATA PROCESSING ---
+    const processAttempts = (quizName, attemptType) => {
+        const subsByStudent = {};
+        allSubmissions.filter(r => r.quiz_name === quizName && r.student_gmail_id).forEach(r => {
+            if (!subsByStudent[r.student_gmail_id]) subsByStudent[r.student_gmail_id] = [];
+            subsByStudent[r.student_gmail_id].push(r);
         });
+        
+        const results = [];
+        for (const email in subsByStudent) {
+            const subs = subsByStudent[email].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+            const ATTEMPT_IDLE_THRESHOLD_MS = 60 * 60 * 1000;
+            const attempts = [];
+            let currentAttempt = null;
 
-        // --- Initial Load ---
-        loadAndProcessData();
+            subs.forEach(sub => {
+                if (!currentAttempt || (new Date(sub.timestamp) - currentAttempt.lastTimestamp > ATTEMPT_IDLE_THRESHOLD_MS)) {
+                    currentAttempt = { questions: new Map(), lastTimestamp: new Date(sub.timestamp) };
+                    attempts.push(currentAttempt);
+                }
+                if (!currentAttempt.questions.has(sub.question_id)) {
+                    currentAttempt.questions.set(sub.question_id, {
+                        isCorrect: sub.is_correct === 'TRUE',
+                        timeSpent: parseFloat(sub.time_spent_seconds) || 0
+                    });
+                }
+                currentAttempt.lastTimestamp = new Date(sub.timestamp);
+            });
+
+            let chosenAttempt = (attemptType === 'first' && attempts.length > 0) ? attempts[0] : (attempts.length > 0) ? attempts[attempts.length - 1] : null;
+            if (chosenAttempt) {
+                let correct = 0, time = 0;
+                chosenAttempt.questions.forEach(q => { if (q.isCorrect) correct++; time += q.timeSpent; });
+                results.push({
+                    email,
+                    raw_score: correct,
+                    total_questions: chosenAttempt.questions.size,
+                    percentage_correct: (chosenAttempt.questions.size > 0 ? (correct / chosenAttempt.questions.size) * 100 : 0).toFixed(1),
+                    time_taken_seconds: time
+                });
+            }
+        }
+        return results;
+    };
+
+    const performDeepDiveAnalysis = (quizName) => {
+        const incorrectCounts = {};
+        allSubmissions.filter(r => r.quiz_name === quizName && r.is_correct === 'FALSE' && r.question_id).forEach(r => {
+            incorrectCounts[r.question_id] = (incorrectCounts[r.question_id] || 0) + 1;
+        });
+        const sorted = Object.entries(incorrectCounts).sort(([, a], [, b]) => b - a);
+        renderDeepDiveTable(sorted);
+    };
+
+    // --- RENDERING HELPERS ---
+    const calculateKPIs = results => {
+        const count = results.length;
+        if (count === 0) return { total: 0, avgRaw: 0, avgPercent: 0, avgTime: 'N/A' };
+        const totalRaw = results.reduce((s, r) => s + r.raw_score, 0);
+        const totalPercent = results.reduce((s, r) => s + parseFloat(r.percentage_correct), 0);
+        const totalTime = results.reduce((s, r) => s + r.time_taken_seconds, 0);
+        return {
+            total: count,
+            avgRaw: (totalRaw / count).toFixed(1),
+            avgPercent: (totalPercent / count).toFixed(1),
+            avgTime: formatTime(totalTime / count)
+        };
+    };
+
+    const renderKPIs = ({ total, avgRaw, avgPercent, avgTime }) => {
+        kpiContainer.innerHTML = `
+            <div class="kpi-card"><div class="title">Total Submissions</div><div class="value">${total}</div></div>
+            <div class="kpi-card"><div class="title">Avg. Raw Score</div><div class="value">${avgRaw}</div></div>
+            <div class="kpi-card"><div class="title">Avg. % Correct</div><div class="value">${avgPercent}%</div></div>
+            <div class="kpi-card"><div class="title">Avg. Time Taken</div><div class="value">${avgTime}</div></div>`;
+    };
+
+    const renderDeepDiveTable = sortedQuestions => {
+        questionAnalysisResults.innerHTML = sortedQuestions.length === 0
+            ? `<p style="padding:1rem 1.5rem; text-align:center;">No incorrect answers recorded for this quiz.</p>`
+            : `<table><thead><tr><th>Question ID</th><th>Times Answered Incorrectly</th></tr></thead><tbody>
+                ${sortedQuestions.map(([id, count]) => `<tr><td>${id}</td><td><b>${count}</b></td></tr>`).join('')}
+              </tbody></table>`;
+    };
+
+    // --- EVENT LISTENERS ---
+    studentFilter.addEventListener('change', () => {
+        updateQuizFilterOptions();
+        updateDashboard();
     });
-    </script>
+    quizFilter.addEventListener('change', updateDashboard);
+    attemptFilter.addEventListener('change', updateDashboard);
+
+    // --- INITIAL LOAD ---
+    loadAndProcessData();
+});
+</script>
 </body>
 </html>

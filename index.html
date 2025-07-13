@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tutor End-of-Chapter Quiz Dashboard</title>
+    <title>Tutor Quiz Dashboard & Analysis</title>
     <style>
         /* General Styling */
         body {
@@ -61,27 +61,34 @@
         tbody tr:nth-child(even) { background-color: #f8f9fa; }
         tbody tr:hover { background-color: #e0e7ff; }
         .loader { text-align: center; padding: 2rem; font-size: 1.2rem; color: #6c757d; }
-
-        /* Quiz Selection */
-        #quiz-selection {
+        
+        /* Filter Styling */
+        #filter-container {
             margin-bottom: 1.5rem;
             padding: 1.5rem;
             background-color: #ffffff;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.05);
             display: flex;
+            flex-wrap: wrap;
             align-items: center;
-            gap: 15px;
+            gap: 20px;
         }
-        #quiz-selection label { font-weight: bold; color: #333; }
-        #quiz-select, #attempt-select {
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .filter-group label { font-weight: bold; color: #333; }
+        .filter-group select {
             padding: 8px 12px;
             border-radius: 5px;
             border: 1px solid #ccc;
             font-size: 1rem;
             min-width: 150px;
+            background-color: #fff;
         }
-        #quiz-select:focus, #attempt-select:focus {
+        .filter-group select:focus {
             outline: none;
             border-color: #2a5266;
             box-shadow: 0 0 0 2px rgba(42, 82, 102, 0.2);
@@ -95,21 +102,28 @@
     </header>
 
     <main>
-        <section id="quiz-selection">
-            <label for="quiz-select">Select Quiz:</label>
-            <select id="quiz-select"></select>
-
-            <label for="attempt-select">Attempt:</label>
-            <select id="attempt-select">
-                <option value="first">First Attempt</option>
-                <option value="latest">Latest Attempt</option>
+        <section id="filter-container">
+            <div class="filter-group">
+                <label for="quiz-filter">Select Quiz:</label>
+                <select id="quiz-filter"></select>
+            </div>
+            <div class="filter-group">
+                <label for="student-filter">Select Student:</label>
+                <select id="student-filter"></select>
+            </div>
+            <div class="filter-group">
+                <label for="attempt-filter">Attempt:</label>
+                <select id="attempt-filter">
+                    <option value="first">First Attempt</option>
+                    <option value="latest">Latest Attempt</option>
                 </select>
+            </div>
         </section>
 
         <section id="kpi-container"></section>
-
+        
         <section id="student-results-section" class="results-section" style="display:none;">
-            <div class="results-header" id="student-results-header">Student Scores for Selected Quiz</div>
+            <div class="results-header" id="student-results-header">Student Scores</div>
             <div class="table-wrapper">
                 <table id="results-table">
                     <thead>
@@ -126,70 +140,55 @@
             </div>
         </section>
 
-        <div id="loader" class="loader"><p>Loading quiz data...</p></div>
+        <section id="deep-dive-section" class="results-section" style="display:none;">
+            <div class="results-header">Deep Dive Analysis: Most Incorrect Questions</div>
+            <div id="question-analysis-results" class="table-wrapper">
+                </div>
+        </section>
 
+        <div id="loader" class="loader"><p>Loading quiz data...</p></div>
     </main>
 
     <script>
     document.addEventListener('DOMContentLoaded', async () => {
 
         // --- CONFIGURATION ---
-        // IMPORTANT: Use the 'Publish to web' URL for your Google Sheet.
-        // It should look like: https://docs.google.com/spreadsheets/d/e/2PACX-1v.../pub?gid=0&single=true&output=csv
-        // This is the URL format that typically works with CORS for public access from web pages.
-        // This URL was in your original working version and should be used:
+        // IMPORTANT: Use the 'Publish to web' URL for your Google Sheet (output=csv).
         const SUBMISSIONS_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vSxW6lYLIfH1r9954znKNbcE90y5qit38yhhyhZnTv_pMCM46H6DdFzQ5ekkJbqtAwfwVBbNegOVzmU/pub?gid=0&single=true&output=csv'; 
-        // If your data is actually in the sheet you screenshot, you need to publish *that specific sheet* to web
-        // and update this URL with the new 'pub?' URL Google provides.
-
-        // Define expected EOC quiz prefixes
-        const EOC_QUIZ_PREFIXES = [
-            "EOC-M-C", // Math End-of-Chapter
-            "EOC-R-C", // Reading End-of-Chapter
-            "EOC-G-C"  // Grammar End-of-Chapter
-        ];
+        
+        const EOC_QUIZ_PREFIXES = ["EOC-M-C", "EOC-R-C", "EOC-G-C"];
 
         // --- DOM Elements ---
-        const quizSelect = document.getElementById('quiz-select');
-        const attemptSelect = document.getElementById('attempt-select');
+        const quizFilter = document.getElementById('quiz-filter');
+        const studentFilter = document.getElementById('student-filter');
+        const attemptFilter = document.getElementById('attempt-filter');
         const loader = document.getElementById('loader');
         const studentResultsSection = document.getElementById('student-results-section');
         const studentResultsHeader = document.getElementById('student-results-header');
         const kpiContainer = document.getElementById('kpi-container');
+        const deepDiveSection = document.getElementById('deep-dive-section');
+        const questionAnalysisResults = document.getElementById('question-analysis-results');
 
         let allSubmissions = []; // Store all parsed submissions globally
-        let uniqueQuizNames = []; // Store unique EOC quiz names
 
         // --- HELPER FUNCTIONS ---
         function parseCSV(text) {
-            let lines = text.trim().split('\n');
+            const lines = text.trim().split('\n');
             const headers = lines[0].split(',').map(h => h.trim());
-            const result = [];
-            for (let i = 1; i < lines.length; i++) {
-                if (!lines[i]) continue;
+            return lines.slice(1).map(line => {
                 const obj = {};
-                let values = [];
-                let current_value = '';
-                let in_quotes = false;
-                for (const char of lines[i]) {
-                    if (char === '"' && in_quotes) in_quotes = false;
-                    else if (char === '"' && !in_quotes) in_quotes = true;
-                    else if (char === ',' && !in_quotes) {
-                        values.push(current_value.trim());
-                        current_value = '';
-                    } else {
-                        current_value += char;
+                // A simple regex to handle commas inside quoted fields
+                const values = line.match(/(".*?"|[^",]+)(?=\s*,|\s*$)/g) || [];
+                headers.forEach((header, i) => {
+                    let value = (values[i] || '').trim();
+                    // Remove quotes from start and end
+                    if (value.startsWith('"') && value.endsWith('"')) {
+                        value = value.substring(1, value.length - 1);
                     }
-                }
-                values.push(current_value.trim()); // Push the last value
-                for (let j = 0; j < headers.length; j++) {
-                    let value = values[j] || '';
-                    if (value.startsWith('"') && value.endsWith('"')) value = value.substring(1, value.length - 1);
-                    obj[headers[j]] = value;
-                }
-                result.push(obj);
-            }
-            return result;
+                    obj[header] = value;
+                });
+                return obj;
+            });
         }
 
         function formatTime(seconds) {
@@ -199,254 +198,241 @@
             return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
         }
 
-        // --- MAIN LOGIC ---
+        // --- DATA LOADING & INITIALIZATION ---
         async function loadAndProcessData() {
             loader.style.display = 'block';
-            studentResultsSection.style.display = 'none';
-            kpiContainer.innerHTML = '';
-
             try {
-                const submissionsRes = await fetch(SUBMISSIONS_CSV_URL); 
-
-                if (!submissionsRes.ok) throw new Error(`Failed to fetch submissions. Status: ${submissionsRes.status}`);
-
-                const csvText = await submissionsRes.text();
+                const response = await fetch(SUBMISSIONS_CSV_URL);
+                if (!response.ok) throw new Error(`Failed to fetch CSV: ${response.statusText}`);
+                const csvText = await response.text();
                 allSubmissions = parseCSV(csvText);
 
-                // Populate quiz select dropdown
-                populateQuizDropdown(allSubmissions);
-
-                // Initial render based on default selections
-                if (uniqueQuizNames.length > 0) {
-                    processAndRenderData();
+                if (allSubmissions.length > 0) {
+                    populateFilters();
+                    updateDashboard();
                 } else {
-                    loader.innerHTML = '<p>No EOC quiz data found.</p>';
+                    loader.innerHTML = '<p>No submission data found.</p>';
                 }
-
             } catch (error) {
                 console.error("Error loading or processing data:", error);
                 loader.innerHTML = `<p style="color:red;">Error: ${error.message}</p>`;
             }
         }
+        
+        function populateFilters() {
+            const quizNames = new Set();
+            const studentEmails = new Set();
 
-        function populateQuizDropdown(submissions) {
-            const quizzes = new Set();
-            submissions.forEach(row => {
-                const quizName = row.quiz_name;
-                if (quizName && EOC_QUIZ_PREFIXES.some(prefix => quizName.startsWith(prefix))) {
-                    quizzes.add(quizName);
+            allSubmissions.forEach(row => {
+                if (row.quiz_name && EOC_QUIZ_PREFIXES.some(prefix => row.quiz_name.startsWith(prefix))) {
+                    quizNames.add(row.quiz_name);
+                }
+                if (row.student_gmail_id) {
+                    studentEmails.add(row.student_gmail_id);
                 }
             });
-            uniqueQuizNames = Array.from(quizzes).sort();
 
-            quizSelect.innerHTML = ''; // Clear previous options
-            if (uniqueQuizNames.length === 0) {
-                quizSelect.innerHTML = '<option value="">No Quizzes Found</option>';
-                quizSelect.disabled = true;
-            } else {
-                quizSelect.disabled = false;
-                uniqueQuizNames.forEach(quiz => {
-                    const option = document.createElement('option');
-                    option.value = quiz;
-                    option.textContent = quiz;
-                    quizSelect.appendChild(option);
-                });
-            }
+            // Populate Quiz Filter
+            quizFilter.innerHTML = Array.from(quizNames).sort().map(name => `<option value="${name}">${name}</option>`).join('');
+            
+            // Populate Student Filter
+            const studentOptions = ['<option value="all">All Students</option>'];
+            studentOptions.push(...Array.from(studentEmails).sort().map(email => `<option value="${email}">${email}</option>`));
+            studentFilter.innerHTML = studentOptions.join('');
         }
 
-        function processAndRenderData() {
-            const selectedQuizName = quizSelect.value;
-            const selectedAttemptType = attemptSelect.value;
+        // --- CORE LOGIC: Dashboard Update ---
+        function updateDashboard() {
+            const selectedQuiz = quizFilter.value;
+            const selectedStudent = studentFilter.value;
+            const selectedAttempt = attemptFilter.value;
 
-            if (!selectedQuizName) {
-                loader.innerHTML = '<p>Please select a quiz.</p>';
+            if (!selectedQuiz) {
+                loader.innerHTML = '<p>Please select a quiz to see results.</p>';
+                [kpiContainer, studentResultsSection, deepDiveSection].forEach(el => el.style.display = 'none');
                 return;
             }
 
             loader.style.display = 'block';
-            studentResultsSection.style.display = 'none';
-            kpiContainer.innerHTML = '';
+            [kpiContainer, studentResultsSection, deepDiveSection].forEach(el => el.style.display = 'none');
 
-            // This structure will hold submissions grouped by student, then by quiz
-            // { email: { quizName: [ { submission_obj1 }, { submission_obj2 } ] } }
-            const studentQuizSubmissionsRaw = {}; 
+            // 1. Process all student attempts for the selected quiz
+            const fullStudentResults = processAllAttempts(selectedQuiz, selectedAttempt);
 
-            allSubmissions.forEach(row => {
-                const email = row.student_gmail_id;
-                const quizName = row.quiz_name;
-                const questionId = row.question_id;
-                const timestampStr = row.timestamp; 
-                
-                // --- CORRECTED: Accessing 'is_correct' and 'time_spent_seconds' as separate columns ---
-                // Assuming your CSV headers are now truly 'is_correct' and 'time_spent_seconds'
-                const isCorrect = row.is_correct === 'TRUE'; 
-                const timeSpentOnQuestion = parseFloat(row.time_spent_seconds); // Directly parse the time
-                
-                if (!email || quizName !== selectedQuizName || !questionId || !timestampStr || isNaN(timeSpentOnQuestion)) {
-                    // console.warn(`Skipping row due to missing/invalid data: ${JSON.stringify(row)}`);
-                    return; // Skip rows that don't have essential data or aren't for the selected quiz
-                }
-
-                const submissionTime = new Date(timestampStr);
-                if (isNaN(submissionTime.getTime())) { 
-                    console.warn(`Invalid timestamp format for row: ${JSON.stringify(row)}`);
-                    return;
-                }
-
-                if (!studentQuizSubmissionsRaw[email]) {
-                    studentQuizSubmissionsRaw[email] = {};
-                }
-                if (!studentQuizSubmissionsRaw[email][quizName]) {
-                    studentQuizSubmissionsRaw[email][quizName] = [];
-                }
-                studentQuizSubmissionsRaw[email][quizName].push({
-                    questionId: questionId,
-                    isCorrect: isCorrect,
-                    timestamp: submissionTime, 
-                    timeSpentQuestion: timeSpentOnQuestion // Use the direct numerical time
-                });
-            });
-
-            // Now, process these raw submissions into distinct attempts
-            const studentResults = [];
-            let totalStudentsWithData = 0;
-            let totalRawScoreSum = 0; 
-            let totalPercentageCorrectSum = 0; 
-            let totalTimeSpentQuizSum = 0; 
-            let studentsContributingToTimeAvg = 0;
-
-            Object.keys(studentQuizSubmissionsRaw).forEach(email => {
-                const quizSubmissionsForStudent = studentQuizSubmissionsRaw[email][selectedQuizName];
-
-                if (!quizSubmissionsForStudent || quizSubmissionsForStudent.length === 0) return;
-
-                quizSubmissionsForStudent.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-
-                const studentAttempts = [];
-                let currentAttempt = null;
-                const ATTEMPT_IDLE_THRESHOLD_MS = 60 * 60 * 1000; // 60 minutes idle to consider a new attempt
-
-                quizSubmissionsForStudent.forEach(submission => {
-                    if (!currentAttempt) {
-                        currentAttempt = {
-                            correctCount: 0,
-                            totalQuestions: 0, 
-                            totalTimeSpentOnQuiz: 0, 
-                            questionIdsInAttempt: new Set(),
-                            firstSubmissionTimestamp: submission.timestamp, // To track overall attempt duration if needed
-                            lastSubmissionTimestamp: submission.timestamp // To track overall attempt duration if needed
-                        };
-                        studentAttempts.push(currentAttempt);
-                    } else {
-                        const timeSinceLastSubmission = submission.timestamp.getTime() - currentAttempt.lastSubmissionTimestamp.getTime();
-
-                        if (timeSinceLastSubmission > ATTEMPT_IDLE_THRESHOLD_MS) {
-                            // New attempt
-                            currentAttempt = {
-                                correctCount: 0,
-                                totalQuestions: 0,
-                                totalTimeSpentOnQuiz: 0,
-                                questionIdsInAttempt: new Set(),
-                                firstSubmissionTimestamp: submission.timestamp,
-                                lastSubmissionTimestamp: submission.timestamp
-                            };
-                            studentAttempts.push(currentAttempt);
-                        } else {
-                            // Continue current attempt
-                            currentAttempt.lastSubmissionTimestamp = submission.timestamp;
-                        }
-                    }
-
-                    // Process the question for the current attempt
-                    if (!currentAttempt.questionIdsInAttempt.has(submission.questionId)) {
-                        currentAttempt.questionIdsInAttempt.add(submission.questionId);
-                        currentAttempt.totalQuestions++;
-                        if (submission.isCorrect) {
-                            currentAttempt.correctCount++;
-                        }
-                        // Add the time spent on *this specific question*
-                        currentAttempt.totalTimeSpentOnQuiz += submission.timeSpentQuestion; 
-                    }
-                });
-
-                let chosenAttemptFinalData = null;
-                if (selectedAttemptType === 'first' && studentAttempts.length > 0) {
-                    chosenAttemptFinalData = studentAttempts[0];
-                } else if (selectedAttemptType === 'latest' && studentAttempts.length > 0) {
-                    chosenAttemptFinalData = studentAttempts[studentAttempts.length - 1];
-                }
-
-                if (chosenAttemptFinalData) {
-                    const percentageCorrect = chosenAttemptFinalData.totalQuestions > 0
-                        ? (chosenAttemptFinalData.correctCount / chosenAttemptFinalData.totalQuestions) * 100
-                        : 0;
-                    
-                    studentResults.push({
-                        email: email,
-                        raw_score: chosenAttemptFinalData.correctCount,
-                        total_questions: chosenAttemptFinalData.totalQuestions,
-                        percentage_correct: percentageCorrect.toFixed(2),
-                        time_taken_seconds: chosenAttemptFinalData.totalTimeSpentOnQuiz // This is now sum of individual question times
-                    });
-
-                    totalStudentsWithData++;
-                    totalRawScoreSum += chosenAttemptFinalData.correctCount;
-                    totalPercentageCorrectSum += percentageCorrect;
-                    
-                    if (chosenAttemptFinalData.totalTimeSpentOnQuiz > 0) {
-                        totalTimeSpentQuizSum += chosenAttemptFinalData.totalTimeSpentOnQuiz;
-                        studentsContributingToTimeAvg++;
-                    }
-                }
-            });
-
-            const avgRawScore = totalStudentsWithData > 0 ? (totalRawScoreSum / totalStudentsWithData).toFixed(2) : 0;
-            const avgPercentageCorrect = totalStudentsWithData > 0 ? (totalPercentageCorrectSum / totalStudentsWithData).toFixed(2) : 0;
-            const avgTimeTakenFormatted = studentsContributingToTimeAvg > 0 ? formatTime(totalTimeSpentQuizSum / studentsContributingToTimeAvg) : 'N/A';
-
-            renderKPIs(totalStudentsWithData, avgRawScore, avgPercentageCorrect, avgTimeTakenFormatted);
-            renderStudentTable(studentResults, selectedQuizName);
+            // 2. Filter results based on selected student
+            const displayedStudentResults = selectedStudent === 'all' 
+                ? fullStudentResults 
+                : fullStudentResults.filter(res => res.email === selectedStudent);
+            
+            // 3. Render KPIs and Student Table based on filtered results
+            const kpis = calculateKPIs(displayedStudentResults);
+            renderKPIs(kpis);
+            renderStudentTable(displayedStudentResults, selectedQuiz);
+            
+            // 4. Perform and Render Deep Dive Analysis (independent of student/attempt filters)
+            performDeepDiveAnalysis(selectedQuiz);
 
             loader.style.display = 'none';
-            studentResultsSection.style.display = 'block';
+            [studentResultsSection, deepDiveSection].forEach(el => el.style.display = 'block');
         }
 
+        function processAllAttempts(selectedQuizName, selectedAttemptType) {
+            const submissionsByStudent = {};
+            allSubmissions
+                .filter(row => row.quiz_name === selectedQuizName && row.student_gmail_id)
+                .forEach(row => {
+                    if (!submissionsByStudent[row.student_gmail_id]) {
+                        submissionsByStudent[row.student_gmail_id] = [];
+                    }
+                    submissionsByStudent[row.student_gmail_id].push(row);
+                });
+            
+            const results = [];
+            for (const email in submissionsByStudent) {
+                const submissions = submissionsByStudent[email].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+                const ATTEMPT_IDLE_THRESHOLD_MS = 60 * 60 * 1000; // 60 mins
+                
+                const attempts = [];
+                let currentAttempt = null;
+
+                submissions.forEach(sub => {
+                    const submissionTime = new Date(sub.timestamp);
+                    if (!currentAttempt || (submissionTime - currentAttempt.lastTimestamp > ATTEMPT_IDLE_THRESHOLD_MS)) {
+                        currentAttempt = { questions: new Map(), lastTimestamp: submissionTime };
+                        attempts.push(currentAttempt);
+                    }
+                    if (!currentAttempt.questions.has(sub.question_id)) {
+                        currentAttempt.questions.set(sub.question_id, {
+                            isCorrect: sub.is_correct === 'TRUE',
+                            timeSpent: parseFloat(sub.time_spent_seconds) || 0
+                        });
+                    }
+                    currentAttempt.lastTimestamp = submissionTime;
+                });
+
+                let chosenAttempt = null;
+                if (selectedAttemptType === 'first' && attempts.length > 0) chosenAttempt = attempts[0];
+                else if (selectedAttemptType === 'latest' && attempts.length > 0) chosenAttempt = attempts[attempts.length - 1];
+
+                if (chosenAttempt) {
+                    let correctCount = 0;
+                    let totalTime = 0;
+                    chosenAttempt.questions.forEach(q => {
+                        if (q.isCorrect) correctCount++;
+                        totalTime += q.timeSpent;
+                    });
+                    const totalQuestions = chosenAttempt.questions.size;
+                    const percentage = totalQuestions > 0 ? (correctCount / totalQuestions) * 100 : 0;
+
+                    results.push({
+                        email: email,
+                        raw_score: correctCount,
+                        total_questions: totalQuestions,
+                        percentage_correct: percentage.toFixed(1),
+                        time_taken_seconds: totalTime
+                    });
+                }
+            }
+            return results;
+        }
+
+        function performDeepDiveAnalysis(selectedQuizName) {
+            const incorrectCounts = {};
+            allSubmissions
+                .filter(row => row.quiz_name === selectedQuizName && row.is_correct === 'FALSE')
+                .forEach(row => {
+                    const qId = row.question_id;
+                    if (qId) {
+                        incorrectCounts[qId] = (incorrectCounts[qId] || 0) + 1;
+                    }
+                });
+
+            const sortedQuestions = Object.entries(incorrectCounts)
+                .sort(([, countA], [, countB]) => countB - countA);
+            
+            renderDeepDiveTable(sortedQuestions);
+        }
+        
         // --- RENDER FUNCTIONS ---
-        function renderKPIs(total, avgRaw, avgPercent, avgTime) {
-            const container = document.getElementById('kpi-container');
-            container.innerHTML = `
-                <div class="kpi-card"><div class="title">Total Students with Data</div><div class="value">${total}</div></div>
+        function calculateKPIs(results) {
+            const totalStudents = results.length;
+            if (totalStudents === 0) return { total: 0, avgRaw: 0, avgPercent: 0, avgTime: 'N/A' };
+            
+            const totalRawScore = results.reduce((sum, r) => sum + r.raw_score, 0);
+            const totalPercent = results.reduce((sum, r) => sum + parseFloat(r.percentage_correct), 0);
+            const totalTime = results.reduce((sum, r) => sum + r.time_taken_seconds, 0);
+
+            return {
+                total: totalStudents,
+                avgRaw: (totalRawScore / totalStudents).toFixed(1),
+                avgPercent: (totalPercent / totalStudents).toFixed(1),
+                avgTime: formatTime(totalTime / totalStudents)
+            };
+        }
+
+        function renderKPIs({ total, avgRaw, avgPercent, avgTime }) {
+            kpiContainer.innerHTML = `
+                <div class="kpi-card"><div class="title">Total Submissions</div><div class="value">${total}</div></div>
                 <div class="kpi-card"><div class="title">Avg. Raw Score</div><div class="value">${avgRaw}</div></div>
                 <div class="kpi-card"><div class="title">Avg. % Correct</div><div class="value">${avgPercent}%</div></div>
-                <div class="kpi-card"><div class="title">Avg. Time Taken (Active)</div><div class="value">${avgTime}</div></div>
+                <div class="kpi-card"><div class="title">Avg. Time Taken</div><div class="value">${avgTime}</div></div>
             `;
         }
 
         function renderStudentTable(data, quizName) {
-            const tableBody = document.getElementById('results-body');
-            tableBody.innerHTML = '';
             studentResultsHeader.textContent = `Student Scores for ${quizName}`;
+            const tableBody = document.getElementById('results-body');
+            data.sort((a, b) => b.percentage_correct - a.percentage_correct);
+            
+            if (data.length === 0) {
+                tableBody.innerHTML = `<tr><td colspan="5" style="text-align:center;">No data available for the selected filters.</td></tr>`;
+                return;
+            }
 
-            data.sort((a, b) => b.percentage_correct - a.percentage_correct); // Sort by percentage correct
-
-            data.forEach(student => {
-                const row = document.createElement('tr');
-                row.innerHTML = `
+            tableBody.innerHTML = data.map(student => `
+                <tr>
                     <td>${student.email}</td>
                     <td>${student.raw_score}</td>
                     <td>${student.total_questions}</td>
                     <td><b>${student.percentage_correct}%</b></td>
                     <td>${formatTime(student.time_taken_seconds)}</td>
-                `;
-                tableBody.appendChild(row);
-            });
+                </tr>
+            `).join('');
+        }
+        
+        function renderDeepDiveTable(sortedQuestions) {
+            if (sortedQuestions.length === 0) {
+                questionAnalysisResults.innerHTML = `<p style="padding:1rem 1.5rem; text-align:center;">No incorrect answers recorded for this quiz.</p>`;
+                return;
+            }
+
+            const table = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Question ID</th>
+                            <th>Times Answered Incorrectly</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${sortedQuestions.map(([id, count]) => `
+                            <tr>
+                                <td>${id}</td>
+                                <td><b>${count}</b></td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+            questionAnalysisResults.innerHTML = table;
         }
 
         // --- Event Listeners ---
-        quizSelect.addEventListener('change', processAndRenderData);
-        attemptSelect.addEventListener('change', processAndRenderData);
+        [quizFilter, studentFilter, attemptFilter].forEach(el => {
+            el.addEventListener('change', updateDashboard);
+        });
 
-        // Load data on page load
+        // --- Initial Load ---
         loadAndProcessData();
     });
     </script>
